@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DjVu to PDF Converter (Fixed)</title>
+    
+    <!-- Load jsPDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    
+    <!-- Load DjVu.js Main Library -->
+    <script src="https://unpkg.com/djvu.js@0.5.4/djvu.js" onerror="alert('Failed to load DjVu.js library. Please check your internet connection or ad-blocker.')"></script>
+
+    <style>
+        :root { --primary: #6366f1; --bg: #0f172a; --card: #1e293b; --text: #f8fafc; }
+        body { font-family: sans-serif; background: var(--bg); color: var(--text); display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .container { background: var(--card); padding: 2rem; border-radius: 12px; max-width: 500px; width: 100%; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        .drop-zone { border: 2px dashed #94a3b8; border-radius: 8px; padding: 40px; cursor: pointer; position: relative; transition: 0.3s; }
+        .drop-zone:hover { border-color: var(--primary); background: rgba(99, 102, 241, 0.1); }
+        input[type="file"] { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+        #status { margin-top: 15px; font-weight: bold; min-height: 20px; }
+        .progress-bar { height: 8px; background: #334155; border-radius: 4px; margin-top: 15px; overflow: hidden; display: none; }
+        .progress-fill { height: 100%; background: var(--primary); width: 0%; transition: width 0.2s; }
+        .btn { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 20px; display: none; }
+        .error { color: #ef4444; margin-top: 10px; font-size: 0.9rem; border: 1px solid #7f1d1d; background: #450a0a; padding: 10px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>DjVu to PDF</h1>
+    <div class="drop-zone" id="dropZone">
+        <span>Click or Drag & Drop .djvu file</span>
+        <input type="file" id="fileInput" accept=".djvu">
+    </div>
+    <div id="status">Waiting for file...</div>
+    <div class="progress-bar" id="progressContainer"><div class="progress-fill" id="progressBar"></div></div>
+    <button class="btn" id="downloadBtn">Download PDF</button>
+</div>
+
+<script>
+    const WORKER_URL = 'https://unpkg.com/djvu.js@0.5.4/djvu_worker.js';
+
+    // --- Helper: Load Worker via Blob to bypass CORS ---
+    async function setupDjVuWorker() {
+        try {
+            const response = await fetch(WORKER_URL);
+            if (!response.ok) throw new Error("Failed to fetch worker script");
+            const scriptContent = await response.text();
+            const blob = new Blob([scriptContent], { type: 'application/javascript' });
+            // Point DjVu library to our local blob URL
+            DjVu.Worker.path = URL.createObjectURL(blob);
+            return true;
+        } catch (e) {
+            console.error(e);
+            document.getElementById('status').innerHTML = `<div class="error">Error initializing worker: ${e.message}.<br>Ensure you are running on localhost.</div>`;
+            return false;
+        }
+    }
+
+    // --- Main Logic ---
+    const fileInput = document.getElementById('fileInput');
+    const statusEl = document.getElementById('status');
+    const progressContainer = document.getElementById('progressContainer');
+    const progressBar = document.getElementById('progressBar');
+    const downloadBtn = document.getElementById('downloadBtn');
+    let currentPdfBlob = null, fileName = "doc.pdf";
+
+    fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // 1. Basic Checks
+        if (typeof DjVu === 'undefined') {
+            statusEl.innerHTML = `<div class="error">Library not loaded. Check internet connection.</div>`;
+            return;
+        }
+
+        // 2. Initialize Worker
+        statusEl.innerText = "Initializing Worker...";
+        const workerReady = await setupDjVuWorker();
+        if (!workerReady) return;
+
+        // 3. Start Conversion
+        try {
+            statusEl.innerText = "Reading file...";
+            progressContainer.style.display = 'block';
+            downloadBtn.style.display = 'none';
+            progressBar.style.width = '0%';
+            
+            fileName = file.name.replace(/\.djvu$/i, ".pdf");
+            const arrayBuffer = await file.arrayBuffer();
+            
+            // Create Document
+            const doc = new DjVu.Document(arrayBuffer);
+            await doc.ready;
+            
+            const pageCount = doc.pages.length;
+            const pdf = new window.jspdf.jsPDF();
+
+            for (let i = 0; i < pageCount; i++) {
+                statusEl.innerText = `Converting page ${i + 1} of ${pageCount}...`;
+                const percent = Math.round(((i) / pageCount) * 100);
+                progressBar.style.width = `${percent}%`;
+
+                // Small delay to let UI update
+                await new Promise(r => setTimeout(r, 0));
+
+                const page = doc.pages[i];
+                // Render page
+                const imageBuffer = await page.render({ scale: 2 }); // Scale 2 for better quality
+
+                // Convert to Canvas -> DataURL
+                const canvas = document.createElement('canvas');
+                canvas.width = imageBuffer.width;
+                canvas.height = imageBuffer.height;
+                const ctx = canvas.getContext('2d');
+                const imageData = new ImageData(new Uint8ClampedArray(imageBuffer.buffer), imageBuffer.width, imageBuffer.height);
+                ctx.putImageData(imageData, 0, 0);
+                
+                // Add to PDF
+                const imgData = canvas.toDataURL('image/jpeg', 0.8);
+                const pdfWidth = pdf.internal.pageSize.getWidth();
+                const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+
+                if (i > 0) pdf.addPage();
+                pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
+            }
+
+            // Finish
+            progressBar.style.width = '100%';
+            statusEl.innerText = "Done!";
+            currentPdfBlob = pdf.output('blob');
+            downloadBtn.innerText = `Download ${fileName}`;
+            downloadBtn.style.display = 'inline-block';
+
+        } catch (err) {
+            console.error(err);
+            statusEl.innerHTML = `<div class="error">${err.message}</div>`;
+        }
+    });
+
+    downloadBtn.addEventListener('click', () => {
+        if (!currentPdfBlob) return;
+        const url = URL.createObjectURL(currentPdfBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    });
+</script>
+</body>
+</html>
